@@ -408,7 +408,11 @@ __s32 minecraft_filter(struct xdp_md *ctx)
     struct initial_state *initial_state = bpf_map_lookup_elem(&conntrack_map, &flow_key);
     if (!initial_state)
     {
-        goto drop; // neither tracked nor verified
+        if (tcp->ack && !tcp->syn)
+        {
+            return XDP_PASS;
+        }
+        goto drop;
     }
 
     const __u8 *tcp_payload = (const __u8 *)tcp + tcp_hdr_len;
@@ -444,7 +448,7 @@ __s32 minecraft_filter(struct xdp_md *ctx)
         // fall through into payload inspection instead
         if (tcp_payload >= tcp_payload_end)
         {
-            goto drop;
+            return XDP_PASS;
         }
     }
 
@@ -480,7 +484,7 @@ __s32 minecraft_filter(struct xdp_md *ctx)
             {
                 // even with retransmissions the handshake of a legitimate
                 // client is always parseable, this connection is bogus
-                goto drop;
+                return switch_to_verified(raw_packet_len, stats_ptr, &flow_key);
             }
             if (next_state == RECEIVED_LEGACY_PING)
             {
