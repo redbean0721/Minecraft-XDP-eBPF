@@ -1,9 +1,10 @@
+use std::net::Ipv4Addr;
 use std::sync::{Arc, LazyLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use aya::maps::{MapData, PerCpuArray};
+use aya::maps::{HashMap, MapData, PerCpuArray};
 use aya::{Ebpf, Pod};
 use log::{debug, error, info};
 use prometheus::{Encoder, IntCounter, TextEncoder, register_int_counter};
@@ -89,6 +90,11 @@ pub fn start(
         .context("can't take map 'stats_map'")?;
     let stats = PerCpuArray::try_from(map)?;
 
+    let dropped_ips_map = ebpf
+        .take_map("dropped_ips_map")
+        .context("can't take map 'dropped_ips_map'")?;
+    let dropped_ips: HashMap<MapData, u32, u64> = HashMap::try_from(dropped_ips_map)?;
+
     match &config.metrics.addr {
         Some(addr) => serve_http(addr.clone()),
         None => info!("Metrics collection enabled but no addr set; HTTP endpoint disabled"),
@@ -98,7 +104,7 @@ pub fn start(
     let shutdown = shutdown.clone();
     let handle = thread::Builder::new()
         .name("track-stats".into())
-        .spawn(move || poll_loop(stats, shutdown, poll_interval))?;
+        .spawn(move || poll_loop(stats, dropped_ips, shutdown, poll_interval))?;
     Ok(Some(handle))
 }
 
@@ -108,6 +114,7 @@ pub fn start(
 /// filter itself.
 fn poll_loop(
     stats: PerCpuArray<MapData, Statistics>,
+    mut dropped_ips: HashMap<MapData, u32, u64>,
     shutdown: Arc<Shutdown>,
     poll_interval: Duration,
 ) {
@@ -125,6 +132,25 @@ fn poll_loop(
                 error!("Failed to read stats map (retrying next interval): {e}");
             }
         }
+
+        let mut keys_to_remove = Vec::new();
+        for item in dropped_ips.iter() {
+            match item {
+                Ok((ip_u32, count)) => {
+                    let ip = Ipv4Addr::from(ip_u32.to_ne_bytes());
+                    debug!("Dropped IP: {ip} count: {count}");
+                    keys_to_remove.push(ip_u32);
+                }
+                Err(e) => {
+                    error!("Failed to read dropped_ips_map (retrying next interval): {e}");
+                }
+            }
+        }
+
+        for key in keys_to_remove {
+            let _ = dropped_ips.remove(&key);
+        }
+
         if !shutdown.sleep(poll_interval) {
             return;
         }

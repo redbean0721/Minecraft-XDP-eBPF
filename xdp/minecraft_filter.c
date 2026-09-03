@@ -156,6 +156,18 @@ struct
 } stats_map SEC(".maps");
 
 /* ------------------------------------------------------------------------
+ * Dropped IPs Map
+ * --------------------------------------------------------------------- */
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 65535);
+    __type(key, __u32);
+    __type(value, __u64);
+} dropped_ips_map SEC(".maps");
+
+/* ------------------------------------------------------------------------
  * Helpers
  * --------------------------------------------------------------------- */
 
@@ -555,6 +567,18 @@ drop_connection:
 drop:
     count_stats(stats_ptr, DROPPED_PACKET, 1);
     count_stats(stats_ptr, DROPPED_BYTES, raw_packet_len);
+
+    if (ip) {
+        __u32 src_ip = ip->saddr;
+        __u64 *dropped_count = bpf_map_lookup_elem(&dropped_ips_map, &src_ip);
+        if (dropped_count) {
+            __sync_fetch_and_add(dropped_count, 1);
+        } else {
+            __u64 init_count = 1;
+            bpf_map_update_elem(&dropped_ips_map, &src_ip, &init_count, BPF_ANY);
+        }
+    }
+
     return XDP_DROP;
 update_state:
     initial_state->expected_sequence += tcp_payload_len;
