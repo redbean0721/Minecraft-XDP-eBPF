@@ -4,7 +4,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use aya::maps::{HashMap, MapData, PerCpuArray};
+use aya::maps::{HashMap, MapData, PerCpuArray, PerCpuHashMap};
 use aya::{Ebpf, Pod};
 use log::{debug, error, info};
 use prometheus::{Encoder, IntCounter, TextEncoder, register_int_counter};
@@ -95,6 +95,11 @@ pub fn start(
         .context("can't take map 'dropped_ips_map'")?;
     let dropped_ips: HashMap<MapData, u32, u64> = HashMap::try_from(dropped_ips_map)?;
 
+    let port_stats_map = ebpf
+        .take_map("port_drop_stats")
+        .context("can't take map 'port_drop_stats'")?;
+    let port_stats: PerCpuHashMap<MapData, u16, u64> = PerCpuHashMap::try_from(port_stats_map)?;
+
     match &config.metrics.addr {
         Some(addr) => serve_http(addr.clone()),
         None => info!("Metrics collection enabled but no addr set; HTTP endpoint disabled"),
@@ -104,7 +109,7 @@ pub fn start(
     let shutdown = shutdown.clone();
     let handle = thread::Builder::new()
         .name("track-stats".into())
-        .spawn(move || poll_loop(stats, dropped_ips, shutdown, poll_interval))?;
+        .spawn(move || poll_loop(stats, dropped_ips, port_stats, shutdown, poll_interval))?;
     Ok(Some(handle))
 }
 
@@ -115,6 +120,7 @@ pub fn start(
 fn poll_loop(
     stats: PerCpuArray<MapData, Statistics>,
     mut dropped_ips: HashMap<MapData, u32, u64>,
+    mut port_stats: PerCpuHashMap<MapData, u16, u64>,
     shutdown: Arc<Shutdown>,
     poll_interval: Duration,
 ) {
@@ -133,13 +139,13 @@ fn poll_loop(
             }
         }
 
-        let mut keys_to_remove = Vec::new();
+        let mut ips_to_remove = Vec::new();
         for item in dropped_ips.iter() {
             match item {
                 Ok((ip_u32, count)) => {
                     let ip = Ipv4Addr::from(ip_u32.to_ne_bytes());
                     debug!("Dropped IP: {ip} count: {count}");
-                    keys_to_remove.push(ip_u32);
+                    ips_to_remove.push(ip_u32);
                 }
                 Err(e) => {
                     error!("Failed to read dropped_ips_map (retrying next interval): {e}");
@@ -147,8 +153,26 @@ fn poll_loop(
             }
         }
 
-        for key in keys_to_remove {
+        for key in ips_to_remove {
             let _ = dropped_ips.remove(&key);
+        }
+
+        let mut ports_to_remove = Vec::new();
+        for item in port_stats.iter() {
+            match item {
+                Ok((port, count)) => {
+                    let total_drops: u64 = count.iter().sum();
+                    debug!("Dropped Port: {port} count: {total_drops}");
+                    ports_to_remove.push(port);
+                }
+                Err(e) => {
+                    error!("Failed to read port_drop_stats (retrying next interval): {e}");
+                }
+            }
+        }
+
+        for key in ports_to_remove {
+            let _ = port_stats.remove(&key);
         }
 
         if !shutdown.sleep(poll_interval) {

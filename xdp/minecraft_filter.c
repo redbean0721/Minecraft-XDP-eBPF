@@ -168,6 +168,18 @@ struct
 } dropped_ips_map SEC(".maps");
 
 /* ------------------------------------------------------------------------
+ * Port Drop Stats Map
+ * --------------------------------------------------------------------- */
+
+struct
+{
+    __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+    __uint(max_entries, 65535);
+    __type(key, __u16);
+    __type(value, __u64);
+} port_drop_stats SEC(".maps");
+
+/* ------------------------------------------------------------------------
  * Helpers
  * --------------------------------------------------------------------- */
 
@@ -576,6 +588,16 @@ drop:
         } else {
             __u64 init_count = 1;
             bpf_map_update_elem(&dropped_ips_map, &src_ip, &init_count, BPF_ANY);
+        }
+    }
+
+    if (dest_port >= START_PORT && dest_port <= END_PORT) {
+        __u64 *port_count = bpf_map_lookup_elem(&port_drop_stats, &dest_port);
+        if (port_count) {
+            *port_count += 1;
+        } else {
+            __u64 init_count = 1;
+            bpf_map_update_elem(&port_drop_stats, &dest_port, &init_count, BPF_ANY);
         }
     }
 
