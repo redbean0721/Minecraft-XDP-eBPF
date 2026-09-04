@@ -162,7 +162,7 @@ struct
 struct
 {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 65535);
+    __uint(max_entries, 10000);
     __type(key, __u32);
     __type(value, __u64);
 } dropped_ips_map SEC(".maps");
@@ -289,6 +289,8 @@ __s32 minecraft_filter(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
+    __u32 src_ip = ip->saddr;
+
     // first fragment of a fragmented packet (MF set, offset 0) aimed at our
     // range: the remaining payload is in fragments the state machine never
     // sees, so after kernel reassembly the backend would receive uninspected
@@ -332,7 +334,6 @@ __s32 minecraft_filter(struct xdp_md *ctx)
         goto drop;
     }
 
-    const __u32 src_ip = ip->saddr;
     const struct ipv4_flow_key flow_key = gen_ipv4_flow_key(src_ip, ip->daddr, tcp->source, tcp->dest);
 
     // new connection: throttle it, then start tracking it
@@ -580,8 +581,7 @@ drop:
     count_stats(stats_ptr, DROPPED_PACKET, 1);
     count_stats(stats_ptr, DROPPED_BYTES, raw_packet_len);
 
-    if (ip) {
-        __u32 src_ip = ip->saddr;
+    if (PROMETHEUS) {
         __u64 *dropped_count = bpf_map_lookup_elem(&dropped_ips_map, &src_ip);
         if (dropped_count) {
             __sync_fetch_and_add(dropped_count, 1);
@@ -589,9 +589,7 @@ drop:
             __u64 init_count = 1;
             bpf_map_update_elem(&dropped_ips_map, &src_ip, &init_count, BPF_ANY);
         }
-    }
 
-    if (dest_port >= START_PORT && dest_port <= END_PORT) {
         __u64 *port_count = bpf_map_lookup_elem(&port_drop_stats, &dest_port);
         if (port_count) {
             *port_count += 1;

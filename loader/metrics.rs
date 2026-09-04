@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use aya::maps::{HashMap, MapData, PerCpuArray, PerCpuHashMap};
 use aya::{Ebpf, Pod};
 use log::{debug, error, info};
-use prometheus::{Encoder, IntCounter, IntCounterVec, Opts, TextEncoder, register_int_counter, register_int_counter_vec};
+use prometheus::{
+    Encoder, IntCounter, IntCounterVec, Opts, TextEncoder, register_int_counter,
+    register_int_counter_vec,
+};
 
 use crate::config::Config;
 use crate::shutdown::Shutdown;
@@ -72,17 +75,15 @@ statistics! {
 const _: () = assert!(std::mem::size_of::<Statistics>() == 64);
 
 static COUNTERS: LazyLock<Counters> = LazyLock::new(Counters::new);
-static DROPPED_IPS: LazyLock<IntCounterVec> = LazyLock::new(|| {
-    register_int_counter_vec!(
-        Opts::new("minecraft_dropped_ips_total", "Total dropped packets per source IP"),
-        &["src_ip"]
-    ).unwrap()
-});
 static DROPPED_PORTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     register_int_counter_vec!(
-        Opts::new("minecraft_dropped_ports_total", "Total dropped packets per destination port"),
+        Opts::new(
+            "minecraft_dropped_ports_total",
+            "Total dropped packets per destination port"
+        ),
         &["dest_port"]
-    ).unwrap()
+    )
+    .unwrap()
 });
 
 /// Starts the metrics machinery if enabled in the config: takes ownership of
@@ -155,9 +156,8 @@ fn poll_loop(
         for item in dropped_ips.iter() {
             match item {
                 Ok((ip_u32, count)) => {
-                    let ip = Ipv4Addr::from(ip_u32.to_ne_bytes());
-                    debug!("Dropped IP: {ip} count: {count}");
-                    DROPPED_IPS.with_label_values(&[ip.to_string().as_str()]).inc_by(count);
+                    let ip = Ipv4Addr::from(ip_u32.to_be_bytes());
+                    info!("Dropped IP: {ip} count: {count}");
                     ips_to_remove.push(ip_u32);
                 }
                 Err(e) => {
@@ -176,7 +176,9 @@ fn poll_loop(
                 Ok((port, count)) => {
                     let total_drops: u64 = count.iter().sum();
                     debug!("Dropped Port: {port} count: {total_drops}");
-                    DROPPED_PORTS.with_label_values(&[port.to_string().as_str()]).inc_by(total_drops);
+                    DROPPED_PORTS
+                        .with_label_values(&[port.to_string().as_str()])
+                        .inc_by(total_drops);
                     ports_to_remove.push(port);
                 }
                 Err(e) => {
